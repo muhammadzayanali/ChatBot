@@ -3,24 +3,30 @@ import axios from 'axios'
 import './App.css'
 
 const API_BASE_URL = 'http://localhost:5000'
-const API_ENDPOINT = '/get'
+const API_CHAT = '/api/chat'
+const API_LEGACY = '/get'
 
 function formatTime(date = new Date()) {
   return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
 }
 
+const LANG_LABELS = { en: 'English', es: 'Spanish', pt: 'Portuguese' }
+
 function App() {
   const [messages, setMessages] = useState([
     {
       id: 1,
-      text: "Hello, how can I help you today?",
+      text: "Hello! I'm the Braelo assistant. Ask me about living in the USA or finding local services (e.g. lawyer in Florida, tax preparer in Texas). I support English, Spanish, and Portuguese.",
       sender: 'bot',
-      time: '10:00 AM',
+      time: formatTime(),
+      businesses: [],
+      detectedLanguage: null,
     },
   ])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const messagesEndRef = useRef(null)
+  const [sessionId] = useState(() => `web-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -39,6 +45,8 @@ function App() {
       text,
       sender: 'user',
       time: formatTime(),
+      businesses: [],
+      detectedLanguage: null,
     }
     setMessages((prev) => [...prev, userMsg])
     setInput('')
@@ -46,25 +54,43 @@ function App() {
 
     try {
       const { data } = await axios.post(
-        `${API_BASE_URL}${API_ENDPOINT}`,
-        new URLSearchParams({ msg: text }),
-        { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+        `${API_BASE_URL}${API_CHAT}`,
+        { message: text, session_id: sessionId },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 60000 }
       )
       const botMsg = {
         id: Date.now() + 1,
-        text: typeof data === 'string' ? data : data?.response || JSON.stringify(data),
+        text: typeof data === 'string' ? data : (data?.response ?? data?.error ?? 'No response'),
         sender: 'bot',
         time: formatTime(),
+        businesses: Array.isArray(data?.businesses) ? data.businesses : [],
+        detectedLanguage: data?.detected_language || null,
       }
       setMessages((prev) => [...prev, botMsg])
     } catch (err) {
-      const errorMsg = {
+      const fallback = err.response?.status === 404 || err.response?.data?.error
+        ? null
+        : await (async () => {
+            try {
+              const r = await axios.post(
+                `${API_BASE_URL}${API_LEGACY}`,
+                new URLSearchParams({ msg: text }),
+                { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 }
+              )
+              return typeof r.data === 'string' ? r.data : r.data?.response
+            } catch {
+              return null
+            }
+          })()
+      const botMsg = {
         id: Date.now() + 1,
-        text: 'Sorry, something went wrong. Make sure the backend is running on http://localhost:5000',
+        text: fallback || 'Sorry, something went wrong. Make sure the backend is running on http://localhost:5000 and OPENAI_API_KEY is set for the full assistant.',
         sender: 'bot',
         time: formatTime(),
+        businesses: [],
+        detectedLanguage: null,
       }
-      setMessages((prev) => [...prev, errorMsg])
+      setMessages((prev) => [...prev, botMsg])
     } finally {
       setLoading(false)
     }
@@ -79,50 +105,70 @@ function App() {
 
   return (
     <div className="min-h-screen bg-white flex flex-col items-center">
-      {/* Chat container - web view: max-width card */}
       <div className="w-full max-w-md md:max-w-lg lg:max-w-xl min-h-screen md:rounded-2xl md:shadow-lg md:my-8 flex flex-col bg-white overflow-hidden">
-        {/* Header */}
         <header className="flex-shrink-0 flex items-center gap-3 px-4 py-3 border-b border-gray-100 bg-white">
-          <button
-            type="button"
-            className="p-2 -ml-1 rounded-full hover:bg-gray-100 text-gray-700"
-            aria-label="Back"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-          </button>
           <div className="w-10 h-10 rounded-full bg-indigo-600 flex items-center justify-center flex-shrink-0">
+            <span className="text-white text-xs font-semibold">B</span>
           </div>
           <div className="flex-1 min-w-0">
-            <h1 className="font-semibold text-gray-900 truncate">Chat Bot</h1>
-            <p className="text-sm text-gray-500">Online</p>
+            <h1 className="font-semibold text-gray-900 truncate">Braelo Assistant</h1>
+            <p className="text-sm text-gray-500">English · Español · Português</p>
           </div>
         </header>
 
-        {/* Date separator */}
         <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2">
           <span className="flex-1 h-px bg-gray-200" />
           <span className="text-sm text-gray-500">Today</span>
           <span className="flex-1 h-px bg-gray-200" />
         </div>
 
-        {/* Messages */}
         <div className="flex-1 overflow-y-auto px-4 py-2 space-y-4">
           {messages.map((msg) =>
             msg.sender === 'bot' ? (
               <div key={msg.id} className="flex gap-3 justify-start">
                 <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center flex-shrink-0 mt-0.5">
-                  <span className="text-white text-xs font-semibold">CB</span>
+                  <span className="text-white text-xs font-semibold">B</span>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-baseline gap-2">
-                    <span className="text-sm font-medium text-gray-900">CB assistant</span>
+                  <div className="flex items-baseline gap-2 flex-wrap">
+                    <span className="text-sm font-medium text-gray-900">Braelo</span>
+                    {msg.detectedLanguage && (
+                      <span className="text-xs text-gray-500">
+                        ({LANG_LABELS[msg.detectedLanguage] || msg.detectedLanguage})
+                      </span>
+                    )}
                     <span className="text-xs text-gray-400">{msg.time}</span>
                   </div>
-                  <div className="mt-0.5 rounded-xl rounded-tl-sm bg-gray-100 px-4 py-2.5 text-gray-800 text-[15px]">
+                  <div className="mt-0.5 rounded-xl rounded-tl-sm bg-gray-100 px-4 py-2.5 text-gray-800 text-[15px] whitespace-pre-wrap">
                     {msg.text}
                   </div>
+                  {msg.businesses && msg.businesses.length > 0 && (
+                    <div className="mt-2 space-y-2">
+                      <p className="text-xs font-medium text-gray-600">Local businesses</p>
+                      {msg.businesses.map((b) => (
+                        <a
+                          key={b.id}
+                          href={b.contact_info?.startsWith('http') ? b.contact_info : `tel:${b.contact_info || ''}`}
+                          target={b.contact_info?.startsWith('http') ? '_blank' : undefined}
+                          rel="noopener noreferrer"
+                          className="block rounded-lg border border-gray-200 bg-white p-3 text-left hover:border-indigo-300 hover:bg-indigo-50/50 transition"
+                        >
+                          <span className="font-medium text-gray-900">{b.name}</span>
+                          {(b.category || b.subcategory) && (
+                            <span className="text-gray-500 text-sm ml-1">
+                              {[b.category, b.subcategory].filter(Boolean).join(' · ')}
+                            </span>
+                          )}
+                          {(b.city || b.state) && (
+                            <p className="text-xs text-gray-500 mt-0.5">{[b.city, b.state].filter(Boolean).join(', ')}</p>
+                          )}
+                          {b.contact_info && (
+                            <p className="text-xs text-indigo-600 mt-1 truncate">{b.contact_info}</p>
+                          )}
+                        </a>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             ) : (
@@ -141,7 +187,7 @@ function App() {
           {loading && (
             <div className="flex gap-3 justify-start">
               <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center flex-shrink-0 mt-0.5">
-                <span className="text-white text-xs font-semibold">CB</span>
+                <span className="text-white text-xs font-semibold">B</span>
               </div>
               <div className="rounded-xl rounded-tl-sm bg-gray-100 px-4 py-2.5 text-gray-500 text-sm">
                 Typing...
@@ -151,23 +197,13 @@ function App() {
           <div ref={messagesEndRef} />
         </div>
 
-        {/* Input bar */}
         <div className="flex-shrink-0 flex items-center gap-2 px-4 py-3 bg-white border-t border-gray-100">
-          <button
-            type="button"
-            className="w-10 h-10 rounded-full border border-gray-200 flex items-center justify-center text-gray-600 hover:bg-gray-50 flex-shrink-0"
-            aria-label="Attach"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v14M5 12h14" />
-            </svg>
-          </button>
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Hello,...."
+            placeholder="Ask in English, Spanish, or Portuguese..."
             className="flex-1 min-w-0 rounded-full border border-gray-200 px-4 py-2.5 text-[15px] placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
             disabled={loading}
           />

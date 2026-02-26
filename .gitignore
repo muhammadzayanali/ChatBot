@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+.env
+*.pyc
+
+# Optional: uncomment if you don't want to track trained models/data
+# backend/chatbot_model.h5
+# backend/classes.pkl
+# backend/words.pkl
