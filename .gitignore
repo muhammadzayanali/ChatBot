@@ -2,7 +2,11 @@
 __pycache__/
 *.py[cod]
 .env
+.env.local
 *.pyc
+
+# Env files with secrets (never commit)
+backend/.env
 
 # Optional: uncomment if you don't want to track trained models/data
 # backend/chatbot_model.h5

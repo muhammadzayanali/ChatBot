@@ -6,7 +6,15 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# OpenAI
+# Load .env from backend folder so OPENAI_API_KEY etc. are available
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / ".env")
+    load_dotenv()  # also from current working directory
+except ImportError:
+    pass
+
+# OpenAI (set in .env)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
 # Database: SQLite for dev; set DATABASE_URL for MySQL in production
