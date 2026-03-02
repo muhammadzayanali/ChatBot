@@ -1,9 +1,8 @@
-# libraries
+# libraries - use tensorflow.keras via tf-keras package (TF 2.20+)
 import random
 from tensorflow.keras.optimizers import SGD
-from keras.layers import Dense, Dropout
-from keras.models import load_model
-from keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.models import Sequential, load_model
 import numpy as np
 import pickle
 import json
@@ -106,6 +105,6 @@ model.compile(loss="categorical_crossentropy", optimizer=sgd, metrics=["accuracy
 
 # fitting and saving the model
 hist = model.fit(np.array(train_x), np.array(train_y), epochs=200, batch_size=5, verbose=1)
-model.save("chatbot_model.h5", hist)
+model.save("chatbot_model.h5")
 print("model created")
 

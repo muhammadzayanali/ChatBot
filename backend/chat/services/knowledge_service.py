@@ -1,15 +1,15 @@
 """
 Knowledge base: embeddings and semantic search over client DOCX Q&A.
+Ported from Flask — uses django.conf.settings instead of config module.
 """
 import json
 import math
 import unicodedata
-from config import EMBEDDING_MODEL, KNOWLEDGE_SIMILARITY_THRESHOLD
+from django.conf import settings
 
 try:
     from openai import OpenAI
-    from config import OPENAI_API_KEY
-    _client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+    _client = OpenAI(api_key=settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None
 except Exception:
     _client = None
 
@@ -19,7 +19,7 @@ def get_embedding(text: str) -> list:
     if not text or not _client:
         return []
     try:
-        r = _client.embeddings.create(model=EMBEDDING_MODEL, input=text.strip()[:8000])
+        r = _client.embeddings.create(model=settings.EMBEDDING_MODEL, input=text.strip()[:8000])
         return r.data[0].embedding
     except Exception:
         return []
@@ -56,21 +56,25 @@ def _words(s: str, min_len: int = 2) -> set:
     return words
 
 
-def search_knowledge(query: str, state: str, db_session, limit: int = 5) -> list:
+def search_knowledge(query: str, state: str, limit: int = 5) -> list:
     """
     Semantic search over knowledge_base. Returns list of dicts with question, answer, state, similarity.
     Uses query embedding and cosine similarity; optionally filter by state.
     If no embedding match, falls back to text containment (query in question or question in query).
+
+    Uses Django ORM instead of SQLAlchemy session.
     """
-    from database.models import KnowledgeBase
+    from chat.models import KnowledgeBase
+    from django.db.models import Q
 
     query_clean = _normalize(query or "")
     query_emb = get_embedding(query)
-    rows = db_session.query(KnowledgeBase).filter(KnowledgeBase.embedding_json.isnot(None))
+
+    # Get rows with embeddings
+    qs = KnowledgeBase.objects.filter(embedding_json__isnull=False)
     if state:
-        from sqlalchemy import or_
-        rows = rows.filter(or_(KnowledgeBase.state == state, KnowledgeBase.state.is_(None)))
-    rows = rows.all()
+        qs = qs.filter(Q(state=state) | Q(state__isnull=True))
+    rows = list(qs)
 
     results = []
     if query_emb:
@@ -80,7 +84,7 @@ def search_knowledge(query: str, state: str, db_session, limit: int = 5) -> list
             except Exception:
                 continue
             sim = cosine_similarity(query_emb, emb)
-            if sim >= KNOWLEDGE_SIMILARITY_THRESHOLD:
+            if sim >= settings.KNOWLEDGE_SIMILARITY_THRESHOLD:
                 results.append({
                     "question": row.question,
                     "answer": row.answer,
@@ -92,11 +96,10 @@ def search_knowledge(query: str, state: str, db_session, limit: int = 5) -> list
 
     # Text fallback: exact/substring match, then word-overlap match
     if not results:
-        all_rows = db_session.query(KnowledgeBase)
+        all_qs = KnowledgeBase.objects.all()
         if state:
-            from sqlalchemy import or_
-            all_rows = all_rows.filter(or_(KnowledgeBase.state == state, KnowledgeBase.state.is_(None)))
-        rows_list = all_rows.all()
+            all_qs = all_qs.filter(Q(state=state) | Q(state__isnull=True))
+        rows_list = list(all_qs)
         query_words = _words(query or "")
         for row in rows_list:
             q_clean = _normalize(row.question or "")

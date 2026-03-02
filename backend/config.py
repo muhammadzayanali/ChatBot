@@ -21,7 +21,7 @@ LANGUAGE_NAMES = {"en": "English", "es": "Spanish", "pt": "Portuguese"}
 # GPT
 GPT_MODEL = os.environ.get("GPT_MODEL", "gpt-4o-mini")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
-KNOWLEDGE_SIMILARITY_THRESHOLD = float(os.environ.get("KNOWLEDGE_SIMILARITY_THRESHOLD", "0.72"))
+KNOWLEDGE_SIMILARITY_THRESHOLD = float(os.environ.get("KNOWLEDGE_SIMILARITY_THRESHOLD", "0.62"))
 MAX_BUSINESS_RECOMMENDATIONS = 5
 
 # Optional

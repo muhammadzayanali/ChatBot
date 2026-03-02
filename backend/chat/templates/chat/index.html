@@ -2,8 +2,8 @@
 <html>
 
 <head>
-    <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='style.css')}}" />
-    <!-- <link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='css.css')}}" /> -->
+    {% load static %}
+    <link rel="stylesheet" type="text/css" href="{% static 'chat/style.css' %}" />
     <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
 </head>
 
@@ -12,6 +12,7 @@
         <div class="col-md-10 mr-auto ml-auto">
     <h1>Dentrice AI ChatBot</h1>
     <form>
+        {% csrf_token %}
         <div id="chatbox">
             <div class="col-md-8 ml-auto mr-auto">
                 <p class="botText"><span>Hi! I'm Your bot.</span></p>

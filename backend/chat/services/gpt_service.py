@@ -1,16 +1,16 @@
 """
 GPT service: structured intent/entity extraction and conversational response.
+Ported from Flask — uses django.conf.settings instead of config module.
 """
 import json
 import logging
-import os
 from openai import OpenAI
-from config import OPENAI_API_KEY, GPT_MODEL, SUPPORTED_LANGUAGES, LANGUAGE_NAMES
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 client = None
-if OPENAI_API_KEY:
-    client = OpenAI(api_key=OPENAI_API_KEY)
+if settings.OPENAI_API_KEY:
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 STRUCTURED_SCHEMA = {
     "intent": "information_request | business_search",
@@ -46,7 +46,7 @@ Use null for any field that is not clearly stated or not applicable."""
 
     try:
         resp = client.chat.completions.create(
-            model=GPT_MODEL,
+            model=settings.GPT_MODEL,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -61,7 +61,7 @@ Use null for any field that is not clearly stated or not applicable."""
         for key in ("intent", "category", "subcategory", "state", "city", "detected_language"):
             if key not in data:
                 data[key] = None
-        if data.get("detected_language") not in SUPPORTED_LANGUAGES:
+        if data.get("detected_language") not in settings.SUPPORTED_LANGUAGES:
             data["detected_language"] = "en"
         return data
     except Exception:
@@ -86,7 +86,7 @@ def translate_verified_answer(text: str, target_language: str) -> str:
     """
     if not client or not text or not text.strip():
         return text or ""
-    lang_name = LANGUAGE_NAMES.get(target_language, "English")
+    lang_name = settings.LANGUAGE_NAMES.get(target_language, "English")
     system = f"""You are a translator. Your ONLY job is to translate the following text to {lang_name}.
 Rules:
 - Output the exact same structure: same line breaks, same bullets (•), same numbering.
@@ -97,7 +97,7 @@ Rules:
 
     try:
         resp = client.chat.completions.create(
-            model=GPT_MODEL,
+            model=settings.GPT_MODEL,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -137,7 +137,7 @@ def generate_response(
             reply = reply + "\n\n" + businesses_text
         return reply
 
-    lang_name = LANGUAGE_NAMES.get(language, "English")
+    lang_name = settings.LANGUAGE_NAMES.get(language, "English")
     system = f"""You are a helpful AI assistant for immigrant communities in the USA (Hispanic and Brazilian).
 You provide accurate, verified information about living in the USA: immigration, housing, taxes, jobs, etc.
 You MUST respond only in {lang_name}. Be concise and helpful."""
@@ -147,7 +147,7 @@ Give a short helpful response in {lang_name} about living in the USA or suggest 
 
     try:
         resp = client.chat.completions.create(
-            model=GPT_MODEL,
+            model=settings.GPT_MODEL,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},

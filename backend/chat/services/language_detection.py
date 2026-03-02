@@ -1,7 +1,8 @@
 """
 Language detection: Portuguese, Spanish, English.
+Ported from Flask — uses django.conf.settings instead of config module.
 """
-from config import SUPPORTED_LANGUAGES
+from django.conf import settings
 
 try:
     from langdetect import detect, LangDetectException

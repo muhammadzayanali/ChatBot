@@ -19,6 +19,13 @@ _backend_dir = Path(__file__).resolve().parent.parent
 if str(_backend_dir) not in sys.path:
     sys.path.insert(0, str(_backend_dir))
 
+# Load .env from backend so OPENAI_API_KEY is set for embeddings
+try:
+    from dotenv import load_dotenv
+    load_dotenv(_backend_dir / ".env")
+except ImportError:
+    pass
+
 from docx import Document
 from config import DOCX_DATA_DIR, OPENAI_API_KEY
 from database.models import init_db, SessionLocal, KnowledgeBase
@@ -68,10 +75,91 @@ def parse_qa_pairs(paragraphs: list) -> list:
     return pairs
 
 
+def parse_question_answer_paragraphs(paragraphs: list) -> list:
+    """Pair paragraphs: if a paragraph ends with '?', use it as question and next paragraph as answer."""
+    pairs = []
+    i = 0
+    while i < len(paragraphs):
+        q = paragraphs[i].strip()
+        if not q:
+            i += 1
+            continue
+        if q.rstrip().endswith("?") and i + 1 < len(paragraphs):
+            a = paragraphs[i + 1].strip()
+            if a:
+                pairs.append((q, a))
+                i += 2
+                continue
+        # No question mark or no next para: treat as Q&A with same text (answer might be in same para)
+        pairs.append((q, q))
+        i += 1
+    return pairs
+
+
+def _is_question_line(text: str) -> bool:
+    """True if line looks like a question (ends with ?) or a numbered question (e.g. '16. Como...')."""
+    t = text.strip()
+    if not t:
+        return False
+    if t.rstrip().endswith("?"):
+        return True
+    if re.match(r"^\d+\.\s+", t):
+        return True
+    return False
+
+
+def parse_question_answer_multiparagraph(paragraphs: list) -> list:
+    """
+    Pair question with full answer: question = line ending with ? or starting with "N. ".
+    Answer = all following paragraphs until the next question line (inclusive of bullets/lists).
+    Returns [(question, full_answer_text), ...] with full_answer_text containing newlines.
+    """
+    pairs = []
+    i = 0
+    while i < len(paragraphs):
+        line = paragraphs[i].strip()
+        if not line:
+            i += 1
+            continue
+        if not _is_question_line(line):
+            i += 1
+            continue
+        q = line
+        answer_lines = []
+        j = i + 1
+        while j < len(paragraphs):
+            next_line = paragraphs[j].strip()
+            if not next_line:
+                j += 1
+                continue
+            if _is_question_line(next_line):
+                break
+            answer_lines.append(next_line)
+            j += 1
+        full_answer = "\n".join(answer_lines).strip() if answer_lines else q
+        pairs.append((q, full_answer))
+        i = j if answer_lines else i + 1
+    return pairs
+
+
 def main():
-    data_dir = Path(DOCX_DATA_DIR)
-    if not data_dir.is_dir():
-        data_dir = _backend_dir.parent
+    # Try multiple locations so we find client DOCX regardless of where they're placed
+    candidates = [
+        Path(DOCX_DATA_DIR),
+        _backend_dir.parent,  # project root
+        _backend_dir,         # backend folder
+        _backend_dir / "data",
+        _backend_dir.parent / "documents",
+    ]
+    data_dir = None
+    for d in candidates:
+        if d.is_dir():
+            # Check that we have at least one Respostas file or the questions file
+            if (d / QUESTIONS_FILE).exists() or list(d.glob("Respostas *.docx")):
+                data_dir = d
+                break
+    if data_dir is None:
+        data_dir = _backend_dir.parent if _backend_dir.parent.is_dir() else _backend_dir
     print(f"Using data dir: {data_dir}")
 
     init_db()
@@ -100,8 +188,17 @@ def main():
                 if pairs:
                     state_answers[state] = pairs
                 else:
-                    # Each para as both question and answer (for embedding search)
-                    state_answers[state] = [(p, p) for p in paras]
+                    # Prefer full multi-paragraph answers (question? then all bullets/lines until next question)
+                    pairs = parse_question_answer_multiparagraph(paras)
+                    if pairs:
+                        state_answers[state] = pairs
+                    else:
+                        # Fallback: single question + single answer paragraph
+                        pairs = parse_question_answer_paragraphs(paras)
+                        if pairs:
+                            state_answers[state] = pairs
+                        else:
+                            state_answers[state] = [(p, p) for p in paras]
             print(f"  {state}: {len(state_answers[state])} entries")
 
     if not state_answers and not questions:

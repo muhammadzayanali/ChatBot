@@ -2,7 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import axios from 'axios'
 import './App.css'
 
-const API_BASE_URL = 'http://localhost:5000'
+const API_BASE_URL = 'http://127.0.0.1:5000/'
 const API_CHAT = '/api/chat'
 const API_LEGACY = '/get'
 
@@ -65,6 +65,7 @@ function App() {
         time: formatTime(),
         businesses: Array.isArray(data?.businesses) ? data.businesses : [],
         detectedLanguage: data?.detected_language || null,
+        questionAnalysis: data?.question_analysis || null,
       }
       setMessages((prev) => [...prev, botMsg])
     } catch (err) {
@@ -122,7 +123,7 @@ function App() {
           <span className="flex-1 h-px bg-gray-200" />
         </div>
 
-        <div className="flex-1 overflow-y-auto px-4 py-2 space-y-4">
+        <div className="flex-1 overflow-y-auto px-4 py-2 pb-20 space-y-4">
           {messages.map((msg) =>
             msg.sender === 'bot' ? (
               <div key={msg.id} className="flex gap-3 justify-start">
@@ -132,16 +133,26 @@ function App() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-baseline gap-2 flex-wrap">
                     <span className="text-sm font-medium text-gray-900">Braelo</span>
-                    {msg.detectedLanguage && (
+                    {/* {msg.detectedLanguage && (
                       <span className="text-xs text-gray-500">
                         ({LANG_LABELS[msg.detectedLanguage] || msg.detectedLanguage})
                       </span>
-                    )}
+                    )} */}
                     <span className="text-xs text-gray-400">{msg.time}</span>
                   </div>
                   <div className="mt-0.5 rounded-xl rounded-tl-sm bg-gray-100 px-4 py-2.5 text-gray-800 text-[15px] whitespace-pre-wrap">
                     {msg.text}
                   </div>
+                  {msg.questionAnalysis && (
+                    <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-gray-500">
+                      <span>Intent: {msg.questionAnalysis.intent || '—'}</span>
+                      {msg.questionAnalysis.category && <span>Category: {msg.questionAnalysis.category}</span>}
+                      {msg.questionAnalysis.state && <span>State: {msg.questionAnalysis.state}</span>}
+                      {msg.questionAnalysis.detected_language && (
+                        <span>Language: {LANG_LABELS[msg.questionAnalysis.detected_language] || msg.questionAnalysis.detected_language}</span>
+                      )}
+                    </div>
+                  )}
                   {msg.businesses && msg.businesses.length > 0 && (
                     <div className="mt-2 space-y-2">
                       <p className="text-xs font-medium text-gray-600">Local businesses</p>

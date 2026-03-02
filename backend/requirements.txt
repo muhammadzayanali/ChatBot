@@ -18,3 +18,9 @@ langdetect>=1.0.9
 
 # Env
 python-dotenv>=1.0.0
+
+# ML / training (train.py) - TF 2.20 + tf-keras for tensorflow.keras API
+tensorflow>=2.15.0
+tf-keras>=2.20.0
+numpy>=1.24.0
+nltk>=3.8.0

@@ -1,15 +1,23 @@
 # Braelo Flask app: LLM-based chat + optional legacy intent fallback
+#
+# DEPRECATED: This backend has been converted to Django. Use Django as the single backend:
+#   cd backend && python manage.py runserver 5000
+# Same endpoints: /, /api/chat, /get, /api/health, /api/debug/knowledge
+# See CONVERSION_VERIFICATION.md for full mapping.
+#
 import os
 import json
 
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    from pathlib import Path as _P
+    _backend = _P(__file__).resolve().parent
+    load_dotenv(_backend / ".env")
+    load_dotenv()  # also load from cwd
 except ImportError:
     pass
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask import Flask, request, jsonify, Response
 
 from config import OPENAI_API_KEY
 from database.models import init_db
@@ -18,7 +26,39 @@ from database.models import init_db
 init_db()
 
 app = Flask(__name__)
-CORS(app)
+app.url_map.strict_slashes = False  # allow /api/chat and /api/chat/
+
+
+def _cors_headers(origin=None):
+    """Build CORS headers for a response."""
+    o = origin or request.headers.get("Origin") or "*"
+    if o not in ("http://localhost:5173", "http://127.0.0.1:5173"):
+        o = "*"
+    return {
+        "Access-Control-Allow-Origin": o,
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Max-Age": "86400",
+    }
+
+
+@app.before_request
+def handle_preflight():
+    """Answer preflight (OPTIONS) with 200 and CORS headers. Must run before any route."""
+    if request.method != "OPTIONS":
+        return None
+    resp = Response("", status=200, mimetype="text/plain")
+    for k, v in _cors_headers().items():
+        resp.headers[k] = v
+    return resp
+
+
+@app.after_request
+def add_cors_headers(response):
+    """Add CORS headers to every response."""
+    for k, v in _cors_headers().items():
+        response.headers[k] = v
+    return response
 
 # Optional legacy chatbot (only if OPENAI_API_KEY not set and files exist)
 _legacy_model = None
@@ -58,7 +98,7 @@ def home():
 @app.route("/api/chat", methods=["POST", "OPTIONS"])
 def api_chat():
     if request.method == "OPTIONS":
-        return "", 204
+        return "", 200
     try:
         data = request.get_json(force=True, silent=True) or {}
         message = (data.get("message") or data.get("msg") or "").strip()
@@ -91,7 +131,7 @@ def api_chat():
 def get():
     """Legacy form endpoint: msg in form or JSON. Uses LLM flow if OPENAI_API_KEY set, else legacy model."""
     if request.method == "OPTIONS":
-        return "", 204
+        return "", 200
     msg = request.form.get("msg") or (request.get_json(silent=True) or {}).get("msg") or ""
     msg = (msg or "").strip()
     if not msg:
@@ -159,6 +199,25 @@ def get():
 @app.route("/api/health")
 def health():
     return jsonify({"status": "ok", "llm": bool(OPENAI_API_KEY)})
+
+
+@app.route("/api/debug/knowledge")
+def debug_knowledge():
+    """Help verify knowledge base is loaded: count and sample questions. Use for testing only."""
+    from database.models import SessionLocal, KnowledgeBase
+    db = SessionLocal()
+    try:
+        total = db.query(KnowledgeBase).count()
+        with_emb = db.query(KnowledgeBase).filter(KnowledgeBase.embedding_json.isnot(None)).count()
+        sample = db.query(KnowledgeBase).limit(5).all()
+        return jsonify({
+            "knowledge_base_total": total,
+            "knowledge_base_with_embeddings": with_emb,
+            "sample_questions": [{"q": r.question[:80] + ("..." if len(r.question or "") > 80 else ""), "state": r.state} for r in sample],
+            "openai_key_set": bool(OPENAI_API_KEY),
+        })
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":
