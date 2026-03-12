@@ -1,149 +1,232 @@
-# Testing the Braelo Chatbot (Client Requirement)
+# Testing the Braelo Chatbot (Django)
 
-Follow these steps to test so that questions from the client documents (e.g. **Respostas Arizona.docx**) return the **actual answer** from the document, not the generic message.
+This guide uses a **test user and test businesses** with static location so the chatbot returns proper RAG answers and business results without you sending location every time.
 
 ---
 
-## Step 1: Check the setup
+## 1. Setup
 
 ### 1.1 API key
 
 - Create `backend/.env` if it doesn’t exist.
-- Add one line:
+- Add:
   ```env
   OPENAI_API_KEY=sk-your-actual-openai-key
   ```
-- Do **not** put the key inside `config.py`; use only `.env`.
 
-### 1.2 DOCX location
+### 1.2 DOCX files (for RAG)
 
-- Put **Respostas Arizona.docx** in the **project root** (the folder that **contains** the `backend` folder).
-- Example:
-  ```
-  chat bot/           <-- project root
-  ├── backend/
-  ├── frontend/
-  └── Respostas Arizona.docx
-  ```
-- In the DOCX, the question and answer should be in **separate paragraphs**:
-  - Paragraph 1: `Como funciona o crédito para alugar imóvel?`
-  - Paragraph 2: The full answer text.
+- Put **Lista de Perguntas - IA.docx** and **Respostas Arizona.docx** (and other state DOCX if you have them) in the **project root** (folder that contains `backend/` and `frontend/`).
 
 ---
 
-## Step 2: Load the knowledge base
+## 2. One-time setup: migrate, load knowledge, seed test data
 
-From a terminal:
+Run these in order (from the `backend` folder):
 
 ```bash
-cd "D:\vs code program\python\chat bot\backend"
-python scripts/load_docx_to_knowledge.py
+cd backend
+
+# Apply migrations
+python manage.py migrate
+
+# Load Q&A from DOCX into knowledge base (optional: --translate to store answers in English)
+python manage.py load_docx --translate
+
+# Seed test user + businesses with static location (Arizona, Maricopa, Phoenix, lat/lng)
+python manage.py seed_test_data
 ```
 
-- You should see something like:
-  - `Using data dir: D:\vs code program\python\chat bot`
-  - `Arizona: N entries`
-  - `Done. Inserted N rows into knowledge_base.`
-- If you see `No DOCX data found`, the DOCX is not in the expected folder or name.
-- **Important:** Run this with `OPENAI_API_KEY` set in `.env` so embeddings are created. If the key is missing, rows are still inserted but without embeddings (text fallback will still work for exact/similar questions).
+**What `seed_test_data` creates:**
+
+- **Test user** `test-user` with:
+  - State: Arizona, County: Maricopa, ZIP: 85001, City: Phoenix
+  - Latitude/Longitude: 33.4484, -112.0740 (Phoenix area)
+  - `location_enabled`: true
+
+- **4 test businesses** in the same area (legal, tax, immigration, housing) with lat/lng and contact/WhatsApp. One is sponsored (Premium).
+
+After this, use **`user_id` or `session_id` = `"test-user"`** in chat requests so the backend uses this user’s saved location and returns proper RAG and business results.
 
 ---
 
-## Step 3: Verify the knowledge base (debug endpoint)
+## 3. Start the backend
 
-With the Flask server running (`python app.py`), open in the browser or with curl:
-
-**URL:** `http://localhost:5000/api/debug/knowledge`
-
-You should see JSON like:
-
-```json
-{
-  "knowledge_base_total": 5,
-  "knowledge_base_with_embeddings": 5,
-  "sample_questions": [
-    { "q": "Como funciona o crédito para alugar imóvel?", "state": "Arizona" }
-  ],
-  "openai_key_set": true
-}
+```bash
+cd backend
+python manage.py runserver 5000
 ```
 
-- If `knowledge_base_total` is **0**, run Step 2 again and fix the DOCX path/name.
-- If `openai_key_set` is **false**, fix `backend/.env` and restart the server.
+Base URL: **http://localhost:5000**
 
 ---
 
-## Step 4: Restart the Flask server
+## 4. Quick checks
 
-After loading the knowledge base or changing `.env`:
+**Health**
 
-1. Stop the server (Ctrl+C in the terminal where `python app.py` is running).
-2. Start it again:
-   ```bash
-   cd backend
-   python app.py
-   ```
+```bash
+curl http://localhost:5000/api/health
+```
 
----
+Expected: `{"status":"ok","llm":true}`
 
-## Step 5: Test the chat (client requirement)
+**Knowledge base**
 
-### 5.1 From the React app (http://localhost:5173)
+```bash
+curl http://localhost:5000/api/debug/knowledge
+```
 
-1. Open the chat UI.
-2. Send exactly: **Como funciona o crédito para alugar imóvel?**
-3. **Expected:** The bot replies with the **answer from Respostas Arizona.docx** (possibly rephrased or translated by GPT), in Portuguese.
-4. **Not expected:** The generic line: *"I'm here to help with questions about living in the USA and to connect you with local services..."*
-
-### 5.2 From API (e.g. Postman or curl)
-
-**Request:**
-
-- URL: `http://localhost:5000/api/chat`
-- Method: `POST`
-- Headers: `Content-Type: application/json`
-- Body (raw JSON):
-  ```json
-  {
-    "message": "Como funciona o crédito para alugar imóvel?",
-    "session_id": "test-session-1"
-  }
-  ```
-
-**Expected response (conceptually):**
-
-- `detected_language`: `"pt"` (or `"es"` if detected as Spanish).
-- `intent`: `"information_request"`.
-- `response`: The actual answer text from your document (possibly adapted by GPT), **not** the generic “I'm here to help...” message.
+Check: `knowledge_base_total` > 0, `openai_key_set`: true.
 
 ---
 
-## Step 6: If you still get the generic message
+## 5. Test chat (use test user so location is set)
 
-1. **Check the server console** for:
-   - `GPT generate_response failed: ...` → OpenAI API problem (key, quota, or network).
-2. **Check the debug endpoint** again:
-   - `GET http://localhost:5000/api/debug/knowledge`
-   - Ensure `knowledge_base_total` > 0 and your question appears in `sample_questions` (or similar).
-3. **Confirm DOCX format:**
-   - Question paragraph ends with `?`
-   - Answer is the **next** paragraph.
-4. **Re-run the loader** after fixing DOCX or path:
-   ```bash
-   cd backend
-   python scripts/load_docx_to_knowledge.py
-   ```
-   Then restart the server and test again.
+### 5.1 Casual (greeting)
+
+```bash
+curl -X POST http://localhost:5000/api/chat ^
+  -H "Content-Type: application/json" ^
+  -d "{\"message\": \"Hello\", \"user_id\": \"test-user\"}"
+```
+
+(On Linux/Mac use `\` at end of line and `"{\"message\": \"Hello\", \"user_id\": \"test-user\"}"` in one line.)
+
+Expected: Short greeting, no location prompt (test user has location).
+
+---
+
+### 5.2 Information question (RAG from knowledge base)
+
+```bash
+curl -X POST http://localhost:5000/api/chat ^
+  -H "Content-Type: application/json" ^
+  -d "{\"message\": \"How does credit work for renting a place?\", \"user_id\": \"test-user\"}"
+```
+
+Expected: `intent`: `"information_request"`, `response`: answer based on your DOCX content for Arizona (no bullets, no closing phrase). If you don’t have DOCX loaded, you may get “I don’t have specific information…”.
+
+---
+
+### 5.3 Business search (should return test businesses)
+
+```bash
+curl -X POST http://localhost:5000/api/chat ^
+  -H "Content-Type: application/json" ^
+  -d "{\"message\": \"I need a lawyer in Phoenix\", \"user_id\": \"test-user\"}"
+```
+
+Expected: `intent`: `"business_search"`, `businesses`: list with at least one (e.g. “Desert Legal Group”). Response text in flowing paragraphs; may include `see_more` and/or `location_note`.
+
+Try also:
+
+- “Find me a tax preparer”
+- “Immigration help in Arizona”
+- “Real estate agent in Maricopa”
+
+---
+
+### 5.4 With location in body (optional; overrides for that request)
+
+You can send location in the body instead of using the test user:
+
+```bash
+curl -X POST http://localhost:5000/api/chat ^
+  -H "Content-Type: application/json" ^
+  -d "{\"message\": \"Find me a lawyer\", \"session_id\": \"any-id\", \"state\": \"Arizona\", \"county\": \"Maricopa\", \"zip_code\": \"85001\", \"location_enabled\": true}"
+```
+
+---
+
+### 5.5 Contact tracking (WhatsApp button)
+
+After a business search, use a returned `business_id` (e.g. `1`):
+
+```bash
+curl -X POST http://localhost:5000/api/track-contact ^
+  -H "Content-Type: application/json" ^
+  -d "{\"business_id\": 1, \"contact_type\": \"whatsapp\", \"user_id\": \"test-user\"}"
+```
+
+Expected: `{"status":"ok"}`.
+
+---
+
+## 6. Test without test user (location required)
+
+If you use a different `user_id` (e.g. `"other-user"`) and do **not** send location in the body:
+
+- First message may get a reply asking for **state, county, and ZIP**.
+- Send a second message with location in the body, or create another seed user and use that `user_id`.
+
+---
+
+## 7. Frontend testing
+
+1. Start backend: `cd backend && python manage.py runserver 5000`
+2. Start frontend: `cd frontend && npm run dev`
+3. In the app, if your frontend sends **user_id** and **session_id**:
+   - Use `test-user` as the logged-in user (or send `state`, `county`, `zip_code` in the chat API request body).
+4. Ask an info question and a business question; you should get RAG answers and business list for the Phoenix/Arizona test data.
+
+---
+
+## 8. Troubleshooting
+
+| Issue | What to do |
+|-------|------------|
+| “I need your state, county, ZIP” for test-user | Run `python manage.py seed_test_data` again. Ensure you use `"user_id": "test-user"` (or `session_id`) in the request. |
+| No businesses in response | Run `seed_test_data`. Check that businesses exist: Django admin or `GET /api/debug/knowledge` (only confirms KB; for businesses check DB or admin). |
+| Generic “I don’t have specific information” | Load DOCX: `python manage.py load_docx --translate`. Confirm with `GET /api/debug/knowledge` that `knowledge_base_total` > 0. |
+| `openai_key_set: false` | Set `OPENAI_API_KEY` in `backend/.env` and restart the server. |
 
 ---
 
 ## Quick checklist
 
-| Step | What to do | How to verify |
-|------|------------|----------------|
-| 1 | Put `OPENAI_API_KEY` in `backend/.env` | `GET /api/debug/knowledge` → `openai_key_set: true` |
-| 2 | Put `Respostas Arizona.docx` in project root | Loader prints "Arizona: N entries" and "Inserted N rows" |
-| 3 | Run `python scripts/load_docx_to_knowledge.py` | No errors; "Done. Inserted N rows" |
-| 4 | Open `GET /api/debug/knowledge` | `knowledge_base_total` ≥ 1, sample has your question |
-| 5 | Restart Flask (`python app.py`) | Server starts without errors |
-| 6 | Send "Como funciona o crédito para alugar imóvel?" in chat | Response is the document answer, not the generic message |
+| Step | Command / action | Verify |
+|------|------------------|--------|
+| 1 | `OPENAI_API_KEY` in `backend/.env` | `GET /api/health` → `"llm": true` |
+| 2 | DOCX in project root | `python manage.py load_docx --translate` prints “Inserted N rows” |
+| 3 | Seed test data | `python manage.py seed_test_data` → “Created/Updated test user”, “Created/Updated business” |
+| 4 | Start server | `python manage.py runserver 5000` |
+| 5 | Info question with test-user | `POST /api/chat` with `"user_id": "test-user"` and an info question → RAG-style answer |
+| 6 | Business search with test-user | `POST /api/chat` with `"user_id": "test-user"` and “Find a lawyer” → `businesses` list |
+| 7 | Track contact | `POST /api/track-contact` with `business_id` → `{"status":"ok"}` |
+
+---
+
+## Copy-paste testing (Windows PowerShell)
+
+Backend must be running: `python manage.py runserver 5000`
+
+**1. Health**
+```powershell
+curl http://localhost:5000/api/health
+```
+
+**2. Debug knowledge**
+```powershell
+curl http://localhost:5000/api/debug/knowledge
+```
+
+**3. Chat – greeting (test-user)**
+```powershell
+curl -X POST http://localhost:5000/api/chat -H "Content-Type: application/json" -d "{\"message\": \"Hello\", \"user_id\": \"test-user\"}"
+```
+
+**4. Chat – info question (RAG, test-user)**
+```powershell
+curl -X POST http://localhost:5000/api/chat -H "Content-Type: application/json" -d "{\"message\": \"How does credit work for renting?\", \"user_id\": \"test-user\"}"
+```
+
+**5. Chat – business search (test-user)**
+```powershell
+curl -X POST http://localhost:5000/api/chat -H "Content-Type: application/json" -d "{\"message\": \"I need a lawyer in Phoenix\", \"user_id\": \"test-user\"}"
+```
+
+**6. Track contact (use a business id from the previous response, e.g. 1)**
+```powershell
+curl -X POST http://localhost:5000/api/track-contact -H "Content-Type: application/json" -d "{\"business_id\": 1, \"contact_type\": \"whatsapp\", \"user_id\": \"test-user\"}"
+```

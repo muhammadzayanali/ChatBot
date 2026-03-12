@@ -2,9 +2,12 @@ import { useState, useRef, useEffect } from 'react'
 import axios from 'axios'
 import './App.css'
 
-const API_BASE_URL = 'http://127.0.0.1:5000/'
+const API_BASE_URL = 'http://127.0.0.1:5000'
 const API_CHAT = '/api/chat'
 const API_LEGACY = '/get'
+const API_TRACK_CONTACT = '/api/track-contact'
+// Use test-user so backend uses seeded location (Arizona, Maricopa, Phoenix) for RAG and business search
+const TEST_USER_ID = 'test-user'
 
 function formatTime(date = new Date()) {
   return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
@@ -36,6 +39,14 @@ function App() {
     scrollToBottom()
   }, [messages])
 
+  const trackContact = (businessId, contactType = 'whatsapp') => {
+    axios.post(
+      `${API_BASE_URL}${API_TRACK_CONTACT}`,
+      { business_id: businessId, contact_type: contactType, user_id: TEST_USER_ID },
+      { headers: { 'Content-Type': 'application/json' } }
+    ).catch(() => {})
+  }
+
   const sendMessage = async () => {
     const text = input.trim()
     if (!text || loading) return
@@ -53,9 +64,18 @@ function App() {
     setLoading(true)
 
     try {
+      const payload = {
+        message: text,
+        session_id: sessionId,
+        user_id: TEST_USER_ID,
+        location_enabled: true,
+        state: 'Arizona',
+        county: 'Maricopa',
+        zip_code: '85001',
+      }
       const { data } = await axios.post(
         `${API_BASE_URL}${API_CHAT}`,
-        { message: text, session_id: sessionId },
+        payload,
         { headers: { 'Content-Type': 'application/json' }, timeout: 60000 }
       )
       const botMsg = {
@@ -66,6 +86,8 @@ function App() {
         businesses: Array.isArray(data?.businesses) ? data.businesses : [],
         detectedLanguage: data?.detected_language || null,
         questionAnalysis: data?.question_analysis || null,
+        seeMore: data?.see_more ?? false,
+        locationNote: data?.location_note || null,
       }
       setMessages((prev) => [...prev, botMsg])
     } catch (err) {
@@ -83,13 +105,16 @@ function App() {
               return null
             }
           })()
+      const errMsg = err.response?.data?.error || err.message
       const botMsg = {
         id: Date.now() + 1,
-        text: fallback || 'Sorry, something went wrong. Make sure the backend is running on http://localhost:5000 and OPENAI_API_KEY is set for the full assistant.',
+        text: fallback || `Sorry, something went wrong. Make sure the backend is running at ${API_BASE_URL}. ${errMsg ? `(${errMsg})` : ''}`,
         sender: 'bot',
         time: formatTime(),
         businesses: [],
         detectedLanguage: null,
+        seeMore: false,
+        locationNote: null,
       }
       setMessages((prev) => [...prev, botMsg])
     } finally {
@@ -143,6 +168,9 @@ function App() {
                   <div className="mt-0.5 rounded-xl rounded-tl-sm bg-gray-100 px-4 py-2.5 text-gray-800 text-[15px] whitespace-pre-wrap">
                     {msg.text}
                   </div>
+                  {msg.locationNote && (
+                    <p className="mt-1.5 text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-1.5">{msg.locationNote}</p>
+                  )}
                   {msg.questionAnalysis && (
                     <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-gray-500">
                       <span>Intent: {msg.questionAnalysis.intent || '—'}</span>
@@ -157,27 +185,53 @@ function App() {
                     <div className="mt-2 space-y-2">
                       <p className="text-xs font-medium text-gray-600">Local businesses</p>
                       {msg.businesses.map((b) => (
-                        <a
+                        <div
                           key={b.id}
-                          href={b.contact_info?.startsWith('http') ? b.contact_info : `tel:${b.contact_info || ''}`}
-                          target={b.contact_info?.startsWith('http') ? '_blank' : undefined}
-                          rel="noopener noreferrer"
-                          className="block rounded-lg border border-gray-200 bg-white p-3 text-left hover:border-indigo-300 hover:bg-indigo-50/50 transition"
+                          className="block rounded-lg border border-gray-200 bg-white p-3 text-left"
                         >
                           <span className="font-medium text-gray-900">{b.name}</span>
+                          {b.is_sponsored && (
+                            <span className="ml-1.5 text-xs bg-indigo-100 text-indigo-700 rounded px-1.5">Sponsored</span>
+                          )}
                           {(b.category || b.subcategory) && (
-                            <span className="text-gray-500 text-sm ml-1">
+                            <span className="text-gray-500 text-sm ml-1 block mt-0.5">
                               {[b.category, b.subcategory].filter(Boolean).join(' · ')}
                             </span>
                           )}
                           {(b.city || b.state) && (
                             <p className="text-xs text-gray-500 mt-0.5">{[b.city, b.state].filter(Boolean).join(', ')}</p>
                           )}
-                          {b.contact_info && (
-                            <p className="text-xs text-indigo-600 mt-1 truncate">{b.contact_info}</p>
+                          {b.distance_miles != null && (
+                            <p className="text-xs text-gray-500">{b.distance_miles} miles away</p>
                           )}
-                        </a>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {b.whatsapp_url ? (
+                              <a
+                                href={b.whatsapp_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={() => trackContact(b.id, 'whatsapp')}
+                                className="inline-flex items-center gap-1 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-700"
+                              >
+                                Contact via WhatsApp
+                              </a>
+                            ) : null}
+                            {b.contact_info && (
+                              <a
+                                href={b.contact_info?.startsWith('http') ? b.contact_info : `tel:${b.contact_info}`}
+                                target={b.contact_info?.startsWith('http') ? '_blank' : undefined}
+                                rel="noopener noreferrer"
+                                className="text-xs text-indigo-600 hover:underline truncate"
+                              >
+                                {b.contact_info?.startsWith('http') ? 'Visit' : b.contact_info}
+                              </a>
+                            )}
+                          </div>
+                        </div>
                       ))}
+                      {msg.seeMore && (
+                        <p className="text-xs text-indigo-600 font-medium pt-1">See more…</p>
+                      )}
                     </div>
                   )}
                 </div>

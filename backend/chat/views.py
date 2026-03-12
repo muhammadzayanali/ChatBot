@@ -49,10 +49,34 @@ def home(request):
         return HttpResponse("<p>Braelo API. Use POST /api/chat or /get</p>")
 
 
+def _parse_user_location(data: dict) -> dict:
+    """Extract location from request body for RAG and business matching."""
+    loc = {}
+    if data.get("state"):
+        loc["state"] = str(data["state"]).strip()
+    if data.get("county"):
+        loc["county"] = str(data["county"]).strip()
+    if data.get("zip_code"):
+        loc["zip_code"] = str(data["zip_code"]).strip()
+    if "location_enabled" in data:
+        loc["location_enabled"] = bool(data["location_enabled"])
+    if data.get("latitude") is not None:
+        try:
+            loc["latitude"] = float(data["latitude"])
+        except (TypeError, ValueError):
+            pass
+    if data.get("longitude") is not None:
+        try:
+            loc["longitude"] = float(data["longitude"])
+        except (TypeError, ValueError):
+            pass
+    return loc
+
+
 @csrf_exempt
 @require_http_methods(["POST", "OPTIONS"])
 def api_chat(request):
-    """Main chat API endpoint — same as Flask /api/chat."""
+    """Main chat API. Send message + optional location (state, county, zip_code, location_enabled, latitude, longitude)."""
     if request.method == "OPTIONS":
         return HttpResponse("", status=200)
 
@@ -63,17 +87,26 @@ def api_chat(request):
             return JsonResponse({"error": "Invalid or missing message", "response": ""}, status=400)
         user_id = data.get("user_id") or data.get("session_id") or _get_client_ip(request)
         session_id = data.get("session_id") or user_id
+        user_location = _parse_user_location(data)
     except Exception:
         return JsonResponse({"error": "Bad request", "response": ""}, status=400)
 
     try:
         from chat.chat_flow import process_message
-        out = process_message(message, user_id=user_id, session_id=session_id)
+        out = process_message(
+            message,
+            user_id=user_id,
+            session_id=session_id,
+            user_location=user_location,
+        )
         return JsonResponse({
             "response": out["response"],
             "detected_language": out.get("detected_language", "en"),
             "businesses": out.get("businesses", []),
             "intent": out.get("intent", ""),
+            "see_more": out.get("see_more", False),
+            "location_note": out.get("location_note"),
+            "question_analysis": out.get("question_analysis"),
         })
     except Exception as e:
         return JsonResponse({
@@ -107,7 +140,20 @@ def legacy_get(request):
     if django_settings.OPENAI_API_KEY:
         try:
             from chat.chat_flow import process_message
-            out = process_message(msg, user_id=_get_client_ip(request), session_id=_get_client_ip(request))
+            client_id = _get_client_ip(request)
+            loc = {}
+            if request.POST.get("state"):
+                loc["state"] = request.POST.get("state")
+            if request.POST.get("county"):
+                loc["county"] = request.POST.get("county")
+            if request.POST.get("zip_code"):
+                loc["zip_code"] = request.POST.get("zip_code")
+            try:
+                body = json.loads(request.body) if request.body else {}
+                loc.update(_parse_user_location(body))
+            except Exception:
+                pass
+            out = process_message(msg, user_id=client_id, session_id=client_id, user_location=loc or None)
             return HttpResponse(out["response"])
         except Exception:
             return HttpResponse("Sorry, something went wrong. Please try again.")
@@ -171,7 +217,26 @@ def health(request):
 
 @require_http_methods(["GET"])
 def debug_knowledge(request):
-    """Debug knowledge base — same as Flask /api/debug/knowledge."""
+    """Debug knowledge base — same as Flask /api/debug/knowledge. Uses MongoDB when USE_MONGO."""
+    if getattr(django_settings, "USE_MONGO", False):
+        try:
+            from chat.mongo_db import get_db
+            db = get_db()
+            total = db.knowledge_base.count_documents({})
+            with_emb = db.knowledge_base.count_documents({"embedding": {"$exists": True, "$ne": None}})
+            sample = list(db.knowledge_base.find({}).limit(5))
+            return JsonResponse({
+                "knowledge_base_total": total,
+                "knowledge_base_with_embeddings": with_emb,
+                "source": "mongodb",
+                "sample_questions": [
+                    {"q": (r.get("question") or "")[:80] + ("..." if len(r.get("question") or "") > 80 else ""), "state": r.get("state")}
+                    for r in sample
+                ],
+                "openai_key_set": bool(django_settings.OPENAI_API_KEY),
+            })
+        except Exception as e:
+            return JsonResponse({"error": str(e), "knowledge_base_total": 0, "source": "mongodb"}, status=500)
     from chat.models import KnowledgeBase
     total = KnowledgeBase.objects.count()
     with_emb = KnowledgeBase.objects.filter(embedding_json__isnull=False).count()
@@ -188,6 +253,49 @@ def debug_knowledge(request):
         ],
         "openai_key_set": bool(django_settings.OPENAI_API_KEY),
     })
+
+
+@csrf_exempt
+@require_http_methods(["POST", "OPTIONS"])
+def track_contact(request):
+    """Track contact intention (WhatsApp, phone, email) for analytics. No monetization per contact."""
+    if request.method == "OPTIONS":
+        return HttpResponse("", status=200)
+    try:
+        data = json.loads(request.body) if request.body else {}
+        business_id = data.get("business_id")
+        contact_type = (data.get("contact_type") or "whatsapp").lower()
+        if contact_type not in ("whatsapp", "phone", "email"):
+            contact_type = "whatsapp"
+        if not business_id:
+            return JsonResponse({"error": "business_id required"}, status=400)
+        user_id = data.get("user_id") or request.META.get("REMOTE_ADDR")
+
+        if getattr(django_settings, "USE_MONGO", False):
+            try:
+                from chat.mongo_db import get_db
+                from datetime import datetime
+                get_db().contact_tracking.insert_one({
+                    "business_id": str(business_id),
+                    "external_id": str(user_id),
+                    "contact_type": contact_type,
+                    "created_at": datetime.utcnow(),
+                })
+                return JsonResponse({"status": "ok"})
+            except Exception as e:
+                return JsonResponse({"error": str(e)}, status=500)
+
+        from chat.models import Business, ContactTracking
+        from django.shortcuts import get_object_or_404
+        business = get_object_or_404(Business, pk=business_id)
+        ContactTracking.objects.create(
+            business=business,
+            external_id=str(user_id),
+            contact_type=contact_type,
+        )
+        return JsonResponse({"status": "ok"})
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
 
 
 def _get_client_ip(request):

@@ -56,24 +56,191 @@ def _words(s: str, min_len: int = 2) -> set:
     return words
 
 
-def search_knowledge(query: str, state: str, limit: int = 5) -> list:
-    """
-    Semantic search over knowledge_base. Returns list of dicts with question, answer, state, similarity.
-    Uses query embedding and cosine similarity; optionally filter by state.
-    If no embedding match, falls back to text containment (query in question or question in query).
+# Stopwords to ignore when matching query keywords against question/answer (improves relevance)
+_QUERY_STOPWORDS = {
+    "the", "a", "an", "for", "to", "in", "on", "at", "can", "me", "you", "is", "are",
+    "and", "or", "but", "that", "this", "it", "of", "with", "from", "as", "so",
+    "what", "how", "when", "where", "which", "who", "tell", "give", "get", "please",
+}
 
-    Uses Django ORM instead of SQLAlchemy session.
+
+def _significant_query_words(query: str) -> set:
+    """Words from query that are useful for keyword matching (exclude stopwords)."""
+    words = _words(query or "", min_len=2)
+    return words - _QUERY_STOPWORDS
+
+
+def _keyword_match_in_qa(query_words: set, question: str, answer: str) -> float:
+    """Return overlap score (0 to 1) if significant query words appear in question+answer. Used when semantic search misses."""
+    if not query_words:
+        return 0.0
+    combined = _normalize((question or "") + " " + (answer or ""))
+    combined_words = _words(combined, min_len=2)
+    overlap = len(query_words & combined_words) / len(query_words)
+    if len(query_words) <= 3 and overlap >= 0.34:
+        return overlap
+    if overlap >= 0.30:
+        return overlap
+    return 0.0
+
+
+def _search_knowledge_mongo(query: str, state: str = None, county: str = None, limit: int = None) -> list:
+    """Search knowledge_base collection in MongoDB (BraeloDB). Same return format as search_knowledge."""
+    if limit is None:
+        limit = getattr(settings, "RAG_TOP_K", 5)
+    threshold = getattr(settings, "RAG_SIMILARITY_THRESHOLD", settings.KNOWLEDGE_SIMILARITY_THRESHOLD)
+    fallback_threshold = getattr(settings, "RAG_SIMILARITY_FALLBACK", 0.48)
+    query_clean = _normalize(query or "")
+    query_words = _words(query or "")
+    significant_words = _significant_query_words(query or "")
+    # Enrich query with state for better embedding match on location-specific content
+    query_for_emb = (query or "").strip()
+    if state and state not in (query_for_emb or ""):
+        query_for_emb = f"{query_for_emb} {state}".strip()
+    query_emb = get_embedding(query_for_emb)
+    try:
+        from chat.mongo_db import get_db
+        db = get_db()
+        kb = db.knowledge_base
+        mongo_filter = {}
+        if state:
+            mongo_filter["$or"] = [
+                {"state": {"$regex": "^" + state + "$", "$options": "i"}},
+                {"state": None},
+                {"state": ""},
+            ]
+        if county:
+            c_filter = {"$or": [
+                {"county": {"$regex": "^" + county + "$", "$options": "i"}},
+                {"county": None},
+                {"county": ""},
+            ]}
+            if mongo_filter:
+                mongo_filter = {"$and": [mongo_filter, c_filter]}
+            else:
+                mongo_filter = c_filter
+        rows = list(kb.find(mongo_filter)) if mongo_filter else list(kb.find({}))
+    except Exception:
+        return []
+
+    results = []
+    if query_emb:
+        for row in rows:
+            emb = row.get("embedding")
+            if not emb:
+                continue
+            sim = cosine_similarity(query_emb, emb)
+            if sim >= threshold:
+                results.append({
+                    "question": row.get("question", ""),
+                    "answer": row.get("answer", ""),
+                    "state": row.get("state"),
+                    "county": row.get("county"),
+                    "similarity": round(sim, 4),
+                })
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        results = results[:limit]
+
+    # Second pass: lower threshold when no results (e.g. ITIN vs "how to get ITIN" phrasing)
+    if not results and query_emb and fallback_threshold < threshold:
+        for row in rows:
+            emb = row.get("embedding")
+            if not emb:
+                continue
+            sim = cosine_similarity(query_emb, emb)
+            if sim >= fallback_threshold:
+                results.append({
+                    "question": row.get("question", ""),
+                    "answer": row.get("answer", ""),
+                    "state": row.get("state"),
+                    "county": row.get("county"),
+                    "similarity": round(sim, 4),
+                })
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        results = results[:limit]
+
+    # Fallback: exact/substring match on question
+    if not results:
+        for row in rows:
+            q_clean = _normalize(row.get("question") or "")
+            if not q_clean:
+                continue
+            if query_clean in q_clean or q_clean in query_clean or query_clean == q_clean:
+                results.append({
+                    "question": row.get("question", ""),
+                    "answer": row.get("answer", ""),
+                    "state": row.get("state"),
+                    "county": row.get("county"),
+                    "similarity": 1.0,
+                })
+                if len(results) >= limit:
+                    break
+                continue
+            if query_words:
+                q_words = _words(row.get("question") or "")
+                overlap = len(query_words & q_words) / len(query_words)
+                if overlap >= 0.6:
+                    results.append({
+                        "question": row.get("question", ""),
+                        "answer": row.get("answer", ""),
+                        "state": row.get("state"),
+                        "county": row.get("county"),
+                        "similarity": round(overlap, 2),
+                    })
+                    if len(results) >= limit:
+                        break
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+
+    # Fallback: keyword match in question OR answer (so "ITIN approval" finds docs where answer contains ITIN)
+    if not results and significant_words:
+        scored = []
+        for row in rows:
+            q_text = row.get("question") or ""
+            a_text = row.get("answer") or ""
+            score = _keyword_match_in_qa(significant_words, q_text, a_text)
+            if score > 0:
+                scored.append({
+                    "question": q_text,
+                    "answer": a_text,
+                    "state": row.get("state"),
+                    "county": row.get("county"),
+                    "similarity": round(score, 2),
+                })
+        scored.sort(key=lambda x: x["similarity"], reverse=True)
+        results = scored[:limit]
+
+    return results[:limit]
+
+
+def search_knowledge(query: str, state: str = None, county: str = None, limit: int = None) -> list:
     """
+    Semantic search over knowledge_base. Returns list of dicts with question, answer, state, county, similarity.
+    Filters by state and optionally county (exact match). Uses RAG_TOP_K and RAG_SIMILARITY_THRESHOLD from settings.
+    Uses MongoDB (BraeloDB) when USE_MONGO is True, else Django ORM.
+    """
+    if getattr(settings, "USE_MONGO", False):
+        return _search_knowledge_mongo(query, state=state, county=county, limit=limit)
+
     from chat.models import KnowledgeBase
     from django.db.models import Q
 
+    if limit is None:
+        limit = getattr(settings, "RAG_TOP_K", 5)
+    threshold = getattr(settings, "RAG_SIMILARITY_THRESHOLD", settings.KNOWLEDGE_SIMILARITY_THRESHOLD)
+    fallback_threshold = getattr(settings, "RAG_SIMILARITY_FALLBACK", 0.48)
     query_clean = _normalize(query or "")
-    query_emb = get_embedding(query)
+    query_words = _words(query or "")
+    significant_words = _significant_query_words(query or "")
+    query_for_emb = (query or "").strip()
+    if state and state not in (query_for_emb or ""):
+        query_for_emb = f"{query_for_emb} {state}".strip()
+    query_emb = get_embedding(query_for_emb)
 
-    # Get rows with embeddings
     qs = KnowledgeBase.objects.filter(embedding_json__isnull=False)
     if state:
-        qs = qs.filter(Q(state=state) | Q(state__isnull=True))
+        qs = qs.filter(Q(state__iexact=state) | Q(state__isnull=True) | Q(state=""))
+    if county:
+        qs = qs.filter(Q(county__iexact=county) | Q(county__isnull=True) | Q(county=""))
     rows = list(qs)
 
     results = []
@@ -84,40 +251,90 @@ def search_knowledge(query: str, state: str, limit: int = 5) -> list:
             except Exception:
                 continue
             sim = cosine_similarity(query_emb, emb)
-            if sim >= settings.KNOWLEDGE_SIMILARITY_THRESHOLD:
+            if sim >= threshold:
                 results.append({
                     "question": row.question,
                     "answer": row.answer,
                     "state": row.state,
+                    "county": getattr(row, "county", None),
                     "similarity": round(sim, 4),
                 })
         results.sort(key=lambda x: x["similarity"], reverse=True)
         results = results[:limit]
 
-    # Text fallback: exact/substring match, then word-overlap match
+    if not results and query_emb and fallback_threshold < threshold:
+        for row in rows:
+            try:
+                emb = json.loads(row.embedding_json) if isinstance(row.embedding_json, str) else row.embedding_json
+            except Exception:
+                continue
+            sim = cosine_similarity(query_emb, emb)
+            if sim >= fallback_threshold:
+                results.append({
+                    "question": row.question,
+                    "answer": row.answer,
+                    "state": row.state,
+                    "county": getattr(row, "county", None),
+                    "similarity": round(sim, 4),
+                })
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        results = results[:limit]
+
     if not results:
         all_qs = KnowledgeBase.objects.all()
         if state:
-            all_qs = all_qs.filter(Q(state=state) | Q(state__isnull=True))
+            all_qs = all_qs.filter(Q(state__iexact=state) | Q(state__isnull=True) | Q(state=""))
+        if county:
+            all_qs = all_qs.filter(Q(county__iexact=county) | Q(county__isnull=True) | Q(county=""))
         rows_list = list(all_qs)
-        query_words = _words(query or "")
         for row in rows_list:
             q_clean = _normalize(row.question or "")
             if not q_clean:
                 continue
-            # 1) Exact or substring match
             if query_clean in q_clean or q_clean in query_clean or query_clean == q_clean:
-                results.append({"question": row.question, "answer": row.answer, "state": row.state, "similarity": 1.0})
+                results.append({
+                    "question": row.question,
+                    "answer": row.answer,
+                    "state": row.state,
+                    "county": getattr(row, "county", None),
+                    "similarity": 1.0,
+                })
                 if len(results) >= limit:
                     break
                 continue
-            # 2) Word overlap: if most of the query words appear in the question, treat as match
             if query_words:
                 q_words = _words(row.question or "")
                 overlap = len(query_words & q_words) / len(query_words)
                 if overlap >= 0.6:
-                    results.append({"question": row.question, "answer": row.answer, "state": row.state, "similarity": round(overlap, 2)})
+                    results.append({
+                        "question": row.question,
+                        "answer": row.answer,
+                        "state": row.state,
+                        "county": getattr(row, "county", None),
+                        "similarity": round(overlap, 2),
+                    })
                     if len(results) >= limit:
                         break
         results.sort(key=lambda x: x["similarity"], reverse=True)
+
+    if not results and significant_words:
+        fallback_qs = KnowledgeBase.objects.all()
+        if state:
+            fallback_qs = fallback_qs.filter(Q(state__iexact=state) | Q(state__isnull=True) | Q(state=""))
+        if county:
+            fallback_qs = fallback_qs.filter(Q(county__iexact=county) | Q(county__isnull=True) | Q(county=""))
+        scored = []
+        for row in fallback_qs:
+            score = _keyword_match_in_qa(significant_words, row.question or "", row.answer or "")
+            if score > 0:
+                scored.append({
+                    "question": row.question,
+                    "answer": row.answer,
+                    "state": row.state,
+                    "county": getattr(row, "county", None),
+                    "similarity": round(score, 2),
+                })
+        scored.sort(key=lambda x: x["similarity"], reverse=True)
+        results = scored[:limit]
+
     return results[:limit]

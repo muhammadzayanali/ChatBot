@@ -16,8 +16,8 @@ except ImportError:
 # Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Security
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "change-me-in-production")
+# Security (set DJANGO_SECRET_KEY in .env for production)
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or "dev-secret-key-change-in-production-braelo"
 DEBUG = os.environ.get("DJANGO_DEBUG", "True").lower() in ("true", "1", "yes")
 ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "*").split(",")
 
@@ -140,3 +140,20 @@ JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "change-me-in-production")
 
 # Path to DOCX data (project root or backend/data)
 DOCX_DATA_DIR = Path(os.environ.get("DOCX_DATA_DIR", BASE_DIR.parent))
+
+# Business matching: min geographic radius (miles) for "closest available" when no exact match
+BUSINESS_RADIUS_MILES = float(os.environ.get("BUSINESS_RADIUS_MILES", "25"))
+BUSINESS_RADIUS_FALLBACK_MILES = float(os.environ.get("BUSINESS_RADIUS_FALLBACK_MILES", "50"))
+MIN_BUSINESS_RESULTS = 3
+MAX_BUSINESS_RESULTS = 5
+
+# RAG: top-k chunks to retrieve
+RAG_TOP_K = 5
+RAG_SIMILARITY_THRESHOLD = 0.7
+# Lower threshold when first pass returns no results (e.g. different phrasing like "ITIN approval" vs "how to get ITIN")
+RAG_SIMILARITY_FALLBACK = float(os.environ.get("RAG_SIMILARITY_FALLBACK", "0.48"))
+
+# MongoDB (BraeloDB) - use for knowledge base and business/user seed data
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
+MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "BraeloDB")
+USE_MONGO = os.environ.get("USE_MONGO", "true").lower() in ("true", "1", "yes")

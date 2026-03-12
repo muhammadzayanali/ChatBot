@@ -87,6 +87,41 @@ def _is_question_line(text: str) -> bool:
     return False
 
 
+def _starts_with_q(text: str) -> bool:
+    """True if paragraph starts with Q (e.g. 'Q', 'Q:', 'Q '). Used for Q-first format: text before Q is the answer."""
+    t = text.strip()
+    if not t:
+        return False
+    return t[0].upper() == "Q" and (len(t) == 1 or t[1] in (":", " ", "."))
+
+
+def parse_qa_q_first(paragraphs: list) -> list:
+    """
+    Parse Q-first format: when a paragraph starts with 'Q' (or 'Q:', 'Q '), that is the question.
+    Everything before it (since the previous Q) is the answer to the previous question.
+    Returns [(question, answer), ...]. First block before any Q is treated as answer to first Q if present.
+    """
+    pairs = []
+    last_question = None
+    answer_lines = []
+    for line in paragraphs:
+        line = line.strip()
+        if not line:
+            continue
+        if _starts_with_q(line):
+            q_text = re.sub(r"^Q\s*[:\s.]*\s*", "", line, flags=re.I).strip() or line
+            if last_question is not None:
+                answer_text = "\n".join(answer_lines).strip()
+                pairs.append((last_question, answer_text))
+            last_question = q_text
+            answer_lines = []
+        else:
+            answer_lines.append(line)
+    if last_question is not None:
+        pairs.append((last_question, "\n".join(answer_lines).strip()))
+    return pairs
+
+
 def parse_question_answer_multiparagraph(paragraphs: list) -> list:
     """
     Pair question with full answer: question = line ending with ? or starting with "N. ".
@@ -120,12 +155,44 @@ def parse_question_answer_multiparagraph(paragraphs: list) -> list:
     return pairs
 
 
+def translate_to_english(text: str) -> str:
+    """Use OpenAI to translate Spanish/Portuguese text to English. Returns original if no API key or failure."""
+    if not text or not text.strip():
+        return text or ""
+    if not getattr(settings, "OPENAI_API_KEY", None):
+        return text
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        r = client.chat.completions.create(
+            model=getattr(settings, "GPT_MODEL", "gpt-4o-mini"),
+            messages=[
+                {"role": "system", "content": "Translate the following text to English. Preserve meaning and structure. Output only the translation, no bullets or numbering unless in the original."},
+                {"role": "user", "content": text[:6000]},
+            ],
+            temperature=0.2,
+        )
+        out = (r.choices[0].message.content or "").strip()
+        return out if out else text
+    except Exception:
+        return text
+
+
 class Command(BaseCommand):
-    help = "Load client DOCX files into knowledge_base with embeddings"
+    help = "Load client DOCX files into knowledge_base with embeddings (state/county, document_source). Optionally translate answers to English."
+
+    def add_arguments(self, parser):
+        parser.add_argument("--translate", action="store_true", help="Translate Spanish/Portuguese answers to English before storing")
+        parser.add_argument("--dry-run", action="store_true", help="Show what would be loaded without saving")
 
     def handle(self, *args, **options):
         from chat.models import KnowledgeBase
         from chat.services.knowledge_service import get_embedding
+
+        translate = options.get("translate", False)
+        dry_run = options.get("dry_run", False)
+        if dry_run:
+            self.stdout.write("DRY RUN: no changes will be saved.")
 
         _backend_dir = Path(settings.BASE_DIR)
 
@@ -199,23 +266,38 @@ class Command(BaseCommand):
         if not settings.OPENAI_API_KEY:
             self.stdout.write("OPENAI_API_KEY not set. Embeddings will be empty; semantic search will not work until you add key and re-run.")
 
-        existing = KnowledgeBase.objects.count()
-        if existing > 0:
-            KnowledgeBase.objects.all().delete()
-            self.stdout.write(f"Cleared {existing} existing knowledge_base rows.")
+        if not dry_run:
+            existing = KnowledgeBase.objects.count()
+            if existing > 0:
+                KnowledgeBase.objects.all().delete()
+                self.stdout.write(f"Cleared {existing} existing knowledge_base rows.")
 
         added = 0
         for state, question, answer in entries:
+            if translate:
+                answer = translate_to_english(answer)
+                if added == 0:
+                    self.stdout.write("Translating answers to English...")
+            if dry_run:
+                added += 1
+                if added <= 3:
+                    self.stdout.write(f"  [dry-run] state={state}, q={question[:50]}...")
+                continue
             emb = get_embedding(question)
             emb_json = json.dumps(emb) if emb else None
             KnowledgeBase.objects.create(
                 state=state,
+                county=None,  # can be extended if DOCX has county headers
                 question=question,
                 answer=answer,
                 embedding_json=emb_json,
+                document_source=state and f"Respostas {state}.docx" or "Lista de Perguntas - IA.docx",
             )
             added += 1
             if added % 10 == 0:
                 self.stdout.write(f"  Added {added}/{len(entries)}...")
 
-        self.stdout.write(self.style.SUCCESS(f"Done. Inserted {added} rows into knowledge_base."))
+        if dry_run:
+            self.stdout.write(self.style.WARNING(f"Dry run: would insert {added} rows."))
+        else:
+            self.stdout.write(self.style.SUCCESS(f"Done. Inserted {added} rows into knowledge_base."))

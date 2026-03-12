@@ -1,25 +1,35 @@
 """
-Django ORM models for Braelo: User, ChatHistory, KnowledgeBase, AdPackage, Business, ImpressionsLog, Lead.
-Ported from SQLAlchemy models (database/models.py).
+Django ORM models for Braelo: User, ChatHistory, KnowledgeBase, AdPackage, Business, ImpressionsLog, Lead, ContactTracking.
+Extended for client requirements: location (zip, county, state), business rotation, contact tracking.
 """
 from django.db import models
 from django.utils import timezone
 
 
 class User(models.Model):
-    """Chat user identified by an external ID (phone, session, etc.)."""
+    """Chat user; account required for history and location-based analysis."""
     external_id = models.CharField(max_length=128, unique=True, db_index=True)
     language_preference = models.CharField(max_length=8, default="en")
     state = models.CharField(max_length=64, null=True, blank=True)
     city = models.CharField(max_length=128, null=True, blank=True)
+    zip_code = models.CharField(max_length=16, null=True, blank=True, db_index=True)
+    county = models.CharField(max_length=128, null=True, blank=True, db_index=True)
+    location_enabled = models.BooleanField(default=True)
+    latitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
+    is_banned = models.BooleanField(default=False)
 
     class Meta:
         db_table = "users"
 
     def __str__(self):
         return self.external_id
+
+    @property
+    def has_complete_location(self):
+        return bool(self.state and self.county and self.zip_code)
 
 
 class ChatHistory(models.Model):
@@ -40,11 +50,13 @@ class ChatHistory(models.Model):
 
 
 class KnowledgeBase(models.Model):
-    """Q&A knowledge base loaded from DOCX files, with optional OpenAI embeddings."""
-    state = models.CharField(max_length=64, null=True, blank=True)
+    """Q&A knowledge base loaded from DOCX files (by state/county), with optional OpenAI embeddings."""
+    state = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    county = models.CharField(max_length=128, null=True, blank=True, db_index=True)
     question = models.TextField()
     answer = models.TextField()
     embedding_json = models.TextField(null=True, blank=True)  # JSON array of floats
+    document_source = models.CharField(max_length=256, null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -68,18 +80,26 @@ class AdPackage(models.Model):
 
 
 class Business(models.Model):
-    """Local businesses that can be recommended to users."""
+    """Local businesses; service categories are main anchor; may have WhatsApp URL for contact."""
     name = models.CharField(max_length=256)
-    category = models.CharField(max_length=128, null=True, blank=True)
+    category = models.CharField(max_length=128, null=True, blank=True, db_index=True)
     subcategory = models.CharField(max_length=128, null=True, blank=True)
-    state = models.CharField(max_length=64, null=True, blank=True)
+    state = models.CharField(max_length=64, null=True, blank=True, db_index=True)
     city = models.CharField(max_length=128, null=True, blank=True)
+    zip_code = models.CharField(max_length=16, null=True, blank=True, db_index=True)
+    county = models.CharField(max_length=128, null=True, blank=True, db_index=True)
+    latitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=10, decimal_places=7, null=True, blank=True)
     languages = models.CharField(max_length=256, null=True, blank=True)  # comma-separated: en,es,pt
     contact_info = models.TextField(null=True, blank=True)
+    whatsapp_url = models.URLField(max_length=512, null=True, blank=True)
     ad_package = models.ForeignKey(AdPackage, on_delete=models.SET_NULL, null=True, blank=True)
     impression_cap = models.IntegerField(default=1000)
     impressions_used = models.IntegerField(default=0)
+    rotation_index = models.IntegerField(default=0)  # for fair visibility across eligible businesses
     created_at = models.DateTimeField(default=timezone.now)
+    is_active = models.BooleanField(default=True)
+    is_banned = models.BooleanField(default=False)
 
     class Meta:
         db_table = "businesses"
@@ -110,3 +130,16 @@ class Lead(models.Model):
 
     class Meta:
         db_table = "leads"
+
+
+class ContactTracking(models.Model):
+    """Tracks contact intentions (WhatsApp, phone, email) for analytics; no monetization per contact."""
+    CONTACT_TYPES = (("whatsapp", "WhatsApp"), ("phone", "Phone"), ("email", "Email"))
+    user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE)
+    external_id = models.CharField(max_length=128, null=True, blank=True)
+    contact_type = models.CharField(max_length=32, choices=CONTACT_TYPES, default="whatsapp")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "contact_tracking"
