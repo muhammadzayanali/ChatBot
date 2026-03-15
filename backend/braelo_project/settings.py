@@ -147,13 +147,17 @@ BUSINESS_RADIUS_FALLBACK_MILES = float(os.environ.get("BUSINESS_RADIUS_FALLBACK_
 MIN_BUSINESS_RESULTS = 3
 MAX_BUSINESS_RESULTS = 5
 
-# RAG: top-k chunks to retrieve
+# RAG: top-k chunks to retrieve (knowledge base may be in Portuguese; user may ask in English)
 RAG_TOP_K = 5
-RAG_SIMILARITY_THRESHOLD = 0.7
-# Lower threshold when first pass returns no results (e.g. different phrasing like "ITIN approval" vs "how to get ITIN")
-RAG_SIMILARITY_FALLBACK = float(os.environ.get("RAG_SIMILARITY_FALLBACK", "0.48"))
+# Lower threshold so English queries match Portuguese KB entries (cross-lingual embeddings)
+RAG_SIMILARITY_THRESHOLD = float(os.environ.get("RAG_SIMILARITY_THRESHOLD", "0.52"))
+# Fallback when first pass returns no results (e.g. different phrasing or cross-lingual)
+RAG_SIMILARITY_FALLBACK = float(os.environ.get("RAG_SIMILARITY_FALLBACK", "0.38"))
 
-# MongoDB (BraeloDB) - use for knowledge base and business/user seed data
+# MongoDB (chatbot local) - knowledge base, chat users, and combined Braelo data (business_listings, etc.)
 MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB_NAME = os.environ.get("MONGO_DB_NAME", "BraeloDB")
 USE_MONGO = os.environ.get("USE_MONGO", "true").lower() in ("true", "1", "yes")
+
+# Braelo Atlas source URI for syncing Braelo collections into chatbot local DB (optional; set for sync_braelo_mongo)
+BRAELO_MONGO_URI = os.environ.get("BRAELO_MONGO_URI", "")

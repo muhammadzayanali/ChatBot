@@ -1,7 +1,6 @@
 """
 Business matching: geographic (ZIP/county/radius), sponsored first, rotation, 3–5 results, "see more", "closest available".
-Service categories are the main anchor. Tracks impressions and supports WhatsApp contact.
-Uses MongoDB (BraeloDB) when USE_MONGO is True.
+Uses MongoDB when USE_MONGO is True. Reads from Braelo-format collection business_listings (same schema as Braelo backend).
 """
 from django.db import transaction
 from django.db.models import F
@@ -18,6 +17,43 @@ def _distance_miles(lat1, lon1, lat2, lon2):
         return None
 
 
+def _coords_from_braelo_doc(doc):
+    """Extract (latitude, longitude) from Braelo business_listings business_coordinates (GeoJSON Point)."""
+    coords = doc.get("business_coordinates")
+    if not coords or not isinstance(coords, dict):
+        return None, None
+    c = coords.get("coordinates")
+    if not c or len(c) < 2:
+        return None, None
+    # GeoJSON Point: coordinates = [longitude, latitude]
+    try:
+        return float(c[1]), float(c[0])
+    except (TypeError, ValueError):
+        return None, None
+
+
+def _contact_from_braelo_doc(doc):
+    """Build contact_info string from Braelo business_number, business_email, business_website."""
+    parts = []
+    if doc.get("business_number"):
+        parts.append(str(doc["business_number"]).strip())
+    if doc.get("business_email"):
+        parts.append(str(doc["business_email"]).strip())
+    if doc.get("business_website"):
+        parts.append(str(doc["business_website"]).strip())
+    return "; ".join(parts) if parts else None
+
+
+def _whatsapp_url_from_number(number):
+    """Build WhatsApp URL from phone number (digits only)."""
+    if not number:
+        return ""
+    digits = "".join(c for c in str(number) if c.isdigit())
+    if not digits:
+        return ""
+    return f"https://wa.me/{digits}"
+
+
 def _get_top_businesses_mongo(
     category: str = None,
     subcategory: str = None,
@@ -32,7 +68,7 @@ def _get_top_businesses_mongo(
     external_id: str = None,
     session_id: str = None,
 ) -> dict:
-    """Read businesses from MongoDB (BraeloDB), rank, update impressions_used. Same return shape as get_top_businesses."""
+    """Read from business_listings (Braelo format), map to API shape. Same return shape as get_top_businesses."""
     from django.conf import settings
 
     if limit is None:
@@ -42,40 +78,22 @@ def _get_top_businesses_mongo(
     try:
         from chat.mongo_db import get_db
         db = get_db()
-        ad_pkgs = {p["name"]: p for p in db.ad_packages.find({})}
-        q = {
-            "is_active": True,
-            "is_banned": {"$ne": True},
-            "$expr": {"$lt": ["$impressions_used", "$impression_cap"]},
-        }
+        # Braelo collection: business_listings (is_active, business_name, business_category, business_subcategory, business_coordinates, etc.)
+        q = {"is_active": True}
         if category:
-            q["category"] = {"$regex": category, "$options": "i"}
+            q["business_category"] = {"$regex": category, "$options": "i"}
         if subcategory:
-            q["subcategory"] = {"$regex": subcategory, "$options": "i"}
-        if state:
-            q["state"] = {"$regex": state, "$options": "i"}
-        if city:
-            q["city"] = {"$regex": city, "$options": "i"}
-        if county:
-            q["county"] = {"$regex": county, "$options": "i"}
-        if zip_code:
-            q["zip_code"] = zip_code
-        if language:
-            q["languages"] = {"$regex": language, "$options": "i"}
-        all_rows = list(db.businesses.find(q))
+            q["business_subcategory"] = {"$regex": subcategory, "$options": "i"}
+        # Braelo schema has no state/city/county/zip on business_listings; filter by coords later if needed
+        all_rows = list(db.business_listings.find(q))
     except Exception:
         return {"businesses": [], "see_more": False, "location_note": None}
 
     def priority_and_distance(b):
-        pkg_priority = 0
-        ad_name = b.get("ad_package_name")
-        if ad_name and ad_name in ad_pkgs:
-            pkg_priority = ad_pkgs[ad_name].get("priority") or 0
-        dist = None
-        if user_lat is not None and user_lon is not None and b.get("latitude") is not None and b.get("longitude") is not None:
-            dist = _distance_miles(user_lat, user_lon, b["latitude"], b["longitude"])
-        remaining = (b.get("impression_cap") or 0) - (b.get("impressions_used") or 0)
-        return (pkg_priority, dist, b.get("rotation_index", 0), -remaining)
+        # Braelo business_listings has no ad_package / impressions; use 0
+        lat, lon = _coords_from_braelo_doc(b)
+        dist = _distance_miles(user_lat, user_lon, lat, lon) if all(x is not None for x in (user_lat, user_lon, lat, lon)) else None
+        return (0, dist, 0, 0)
 
     def sort_key(b):
         pkg_priority, dist, rot, rem = priority_and_distance(b)
@@ -87,9 +105,10 @@ def _get_top_businesses_mongo(
     within_primary = []
     within_fallback = []
     for b in all_rows:
+        lat, lon = _coords_from_braelo_doc(b)
         dist = None
-        if user_lat is not None and user_lon is not None and b.get("latitude") is not None and b.get("longitude") is not None:
-            dist = _distance_miles(user_lat, user_lon, b["latitude"], b["longitude"])
+        if user_lat is not None and user_lon is not None and lat is not None and lon is not None:
+            dist = _distance_miles(user_lat, user_lon, lat, lon)
         if dist is not None:
             if dist <= radius_miles:
                 within_primary.append((b, dist))
@@ -111,26 +130,24 @@ def _get_top_businesses_mongo(
     out_list = []
     for b, dist in selected_pairs:
         bid = str(b["_id"])
+        contact = _contact_from_braelo_doc(b)
+        number = b.get("business_number")
         out_list.append({
             "id": bid,
-            "name": b.get("name", ""),
-            "category": b.get("category"),
-            "subcategory": b.get("subcategory"),
-            "state": b.get("state"),
-            "city": b.get("city"),
-            "county": b.get("county"),
-            "zip_code": b.get("zip_code"),
-            "languages": b.get("languages"),
-            "contact_info": b.get("contact_info"),
-            "whatsapp_url": b.get("whatsapp_url") or "",
+            "name": b.get("business_name", ""),
+            "category": b.get("business_category"),
+            "subcategory": b.get("business_subcategory"),
+            "state": None,
+            "city": None,
+            "county": None,
+            "zip_code": None,
+            "languages": None,
+            "contact_info": contact,
+            "whatsapp_url": _whatsapp_url_from_number(number) if number else "",
             "distance_miles": dist,
-            "is_sponsored": bool(b.get("ad_package_name")),
+            "is_sponsored": False,
         })
         try:
-            db.businesses.update_one(
-                {"_id": b["_id"]},
-                {"$inc": {"impressions_used": 1}},
-            )
             db.impressions_log.insert_one({
                 "business_id": bid,
                 "external_id": external_id,

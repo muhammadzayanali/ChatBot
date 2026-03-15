@@ -43,6 +43,12 @@ If you use MongoDB at `localhost:27017` with database **BraeloDB**:
    ```
    This seeds the **static/test data** (test user, ad package, 4 businesses) and loads **client DOCX** (e.g. `Respostas Arizona.docx`, `Respostas NY.docx`) **region-wise** into the `knowledge_base` collection. Put DOCX files in the **project root** (same as for `load_docx`).
 
+4. **Combine Braelo DB into chatbot local (optional):** To copy Braelo Atlas data (business_listings, etc.) into this same local MongoDB, set in `backend/.env`:
+   ```env
+   BRAELO_MONGO_URI=mongodb+srv://user:pass@braelo.karg4.mongodb.net/braelo?retryWrites=true&w=majority
+   ```
+   Then run once: `python manage.py sync_braelo_mongo`. This copies all Braelo collections as-is into BraeloDB. The chatbot then reads businesses from **business_listings** (Braelo format). Chatbot-only collections (users, knowledge_base, ad_packages) are not overwritten.
+
 **Option B – Using Django DB only (SQLite/MySQL)**  
 Run these once (or after pulling changes / resetting the DB):
 

@@ -84,12 +84,31 @@ def _keyword_match_in_qa(query_words: set, question: str, answer: str) -> float:
     return 0.0
 
 
-def _search_knowledge_mongo(query: str, state: str = None, county: str = None, limit: int = None) -> list:
-    """Search knowledge_base collection in MongoDB (BraeloDB). Same return format as search_knowledge."""
+def _score_doc_with_cross_lingual(query_emb: list, query_pt_emb: list, doc_emb: list) -> float:
+    """Score a doc using original and (optional) Portuguese query embeddings; use max for cross-lingual KB."""
+    if not doc_emb or not query_emb:
+        return 0.0
+    sim = cosine_similarity(query_emb, doc_emb)
+    if query_pt_emb and len(query_pt_emb) == len(doc_emb):
+        sim_pt = cosine_similarity(query_pt_emb, doc_emb)
+        sim = max(sim, sim_pt)
+    return sim
+
+
+def _search_knowledge_mongo(
+    query: str,
+    state: str = None,
+    county: str = None,
+    limit: int = None,
+    user_language: str = None,
+) -> list:
+    """Search knowledge_base collection in MongoDB (BraeloDB). Same return format as search_knowledge.
+    When user_language is not 'pt', also embeds a Portuguese translation of the query so English/Spanish
+    questions match Portuguese knowledge base entries."""
     if limit is None:
         limit = getattr(settings, "RAG_TOP_K", 5)
     threshold = getattr(settings, "RAG_SIMILARITY_THRESHOLD", settings.KNOWLEDGE_SIMILARITY_THRESHOLD)
-    fallback_threshold = getattr(settings, "RAG_SIMILARITY_FALLBACK", 0.48)
+    fallback_threshold = getattr(settings, "RAG_SIMILARITY_FALLBACK", 0.38)
     query_clean = _normalize(query or "")
     query_words = _words(query or "")
     significant_words = _significant_query_words(query or "")
@@ -98,6 +117,19 @@ def _search_knowledge_mongo(query: str, state: str = None, county: str = None, l
     if state and state not in (query_for_emb or ""):
         query_for_emb = f"{query_for_emb} {state}".strip()
     query_emb = get_embedding(query_for_emb)
+    # Cross-lingual: when KB is in Portuguese and user asks in English/Spanish, embed Portuguese query too
+    query_pt_emb = None
+    if query_emb and user_language and user_language != "pt":
+        try:
+            from chat.services.gpt_service import translate_query_to_portuguese_for_search
+            query_pt = translate_query_to_portuguese_for_search(query or "")
+            if query_pt and query_pt.strip():
+                query_pt_for_emb = query_pt.strip()
+                if state and state not in query_pt_for_emb:
+                    query_pt_for_emb = f"{query_pt_for_emb} {state}".strip()
+                query_pt_emb = get_embedding(query_pt_for_emb)
+        except Exception:
+            pass
     try:
         from chat.mongo_db import get_db
         db = get_db()
@@ -129,7 +161,7 @@ def _search_knowledge_mongo(query: str, state: str = None, county: str = None, l
             emb = row.get("embedding")
             if not emb:
                 continue
-            sim = cosine_similarity(query_emb, emb)
+            sim = _score_doc_with_cross_lingual(query_emb, query_pt_emb, emb)
             if sim >= threshold:
                 results.append({
                     "question": row.get("question", ""),
@@ -141,13 +173,13 @@ def _search_knowledge_mongo(query: str, state: str = None, county: str = None, l
         results.sort(key=lambda x: x["similarity"], reverse=True)
         results = results[:limit]
 
-    # Second pass: lower threshold when no results (e.g. ITIN vs "how to get ITIN" phrasing)
+    # Second pass: lower threshold when no results (e.g. ITIN vs "how to get ITIN" or cross-lingual)
     if not results and query_emb and fallback_threshold < threshold:
         for row in rows:
             emb = row.get("embedding")
             if not emb:
                 continue
-            sim = cosine_similarity(query_emb, emb)
+            sim = _score_doc_with_cross_lingual(query_emb, query_pt_emb, emb)
             if sim >= fallback_threshold:
                 results.append({
                     "question": row.get("question", ""),
@@ -212,14 +244,23 @@ def _search_knowledge_mongo(query: str, state: str = None, county: str = None, l
     return results[:limit]
 
 
-def search_knowledge(query: str, state: str = None, county: str = None, limit: int = None) -> list:
+def search_knowledge(
+    query: str,
+    state: str = None,
+    county: str = None,
+    limit: int = None,
+    user_language: str = None,
+) -> list:
     """
     Semantic search over knowledge_base. Returns list of dicts with question, answer, state, county, similarity.
     Filters by state and optionally county (exact match). Uses RAG_TOP_K and RAG_SIMILARITY_THRESHOLD from settings.
+    When user_language is not 'pt', uses Portuguese query embedding too so English/Spanish questions match PT KB.
     Uses MongoDB (BraeloDB) when USE_MONGO is True, else Django ORM.
     """
     if getattr(settings, "USE_MONGO", False):
-        return _search_knowledge_mongo(query, state=state, county=county, limit=limit)
+        return _search_knowledge_mongo(
+            query, state=state, county=county, limit=limit, user_language=user_language
+        )
 
     from chat.models import KnowledgeBase
     from django.db.models import Q
@@ -227,7 +268,7 @@ def search_knowledge(query: str, state: str = None, county: str = None, limit: i
     if limit is None:
         limit = getattr(settings, "RAG_TOP_K", 5)
     threshold = getattr(settings, "RAG_SIMILARITY_THRESHOLD", settings.KNOWLEDGE_SIMILARITY_THRESHOLD)
-    fallback_threshold = getattr(settings, "RAG_SIMILARITY_FALLBACK", 0.48)
+    fallback_threshold = getattr(settings, "RAG_SIMILARITY_FALLBACK", 0.38)
     query_clean = _normalize(query or "")
     query_words = _words(query or "")
     significant_words = _significant_query_words(query or "")
@@ -235,6 +276,19 @@ def search_knowledge(query: str, state: str = None, county: str = None, limit: i
     if state and state not in (query_for_emb or ""):
         query_for_emb = f"{query_for_emb} {state}".strip()
     query_emb = get_embedding(query_for_emb)
+    # Cross-lingual: when KB is in Portuguese and user asks in English/Spanish
+    query_pt_emb = None
+    if query_emb and user_language and user_language != "pt":
+        try:
+            from chat.services.gpt_service import translate_query_to_portuguese_for_search
+            query_pt = translate_query_to_portuguese_for_search(query or "")
+            if query_pt and query_pt.strip():
+                query_pt_for_emb = query_pt.strip()
+                if state and state not in query_pt_for_emb:
+                    query_pt_for_emb = f"{query_pt_for_emb} {state}".strip()
+                query_pt_emb = get_embedding(query_pt_for_emb)
+        except Exception:
+            pass
 
     qs = KnowledgeBase.objects.filter(embedding_json__isnull=False)
     if state:
@@ -250,7 +304,7 @@ def search_knowledge(query: str, state: str = None, county: str = None, limit: i
                 emb = json.loads(row.embedding_json) if isinstance(row.embedding_json, str) else row.embedding_json
             except Exception:
                 continue
-            sim = cosine_similarity(query_emb, emb)
+            sim = _score_doc_with_cross_lingual(query_emb, query_pt_emb, emb)
             if sim >= threshold:
                 results.append({
                     "question": row.question,
@@ -268,7 +322,7 @@ def search_knowledge(query: str, state: str = None, county: str = None, limit: i
                 emb = json.loads(row.embedding_json) if isinstance(row.embedding_json, str) else row.embedding_json
             except Exception:
                 continue
-            sim = cosine_similarity(query_emb, emb)
+            sim = _score_doc_with_cross_lingual(query_emb, query_pt_emb, emb)
             if sim >= fallback_threshold:
                 results.append({
                     "question": row.question,

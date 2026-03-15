@@ -323,16 +323,15 @@ def process_message(
                 try:
                     from chat.mongo_db import get_db
                     db = get_db()
-                    q = {"is_active": True, "is_banned": {"$ne": True}}
-                    if state:
-                        q["state"] = {"$regex": state, "$options": "i"}
+                    q = {"is_active": True}
                     if category:
                         q["$or"] = [
-                            {"category": {"$regex": category, "$options": "i"}},
-                            {"subcategory": {"$regex": category, "$options": "i"}},
+                            {"business_category": {"$regex": category, "$options": "i"}},
+                            {"business_subcategory": {"$regex": category, "$options": "i"}},
                         ]
-                    for b in db.businesses.find(q).limit(5):
-                        businesses_context += f"{b.get('name','')}: {b.get('category') or ''} {b.get('subcategory') or ''}, {b.get('city') or ''} {b.get('state') or ''}. {b.get('contact_info') or ''}\n"
+                    for b in db.business_listings.find(q).limit(5):
+                        contact = (b.get("business_number") or "") + " " + (b.get("business_email") or "")
+                        businesses_context += f"{b.get('business_name','')}: {b.get('business_category') or ''} {b.get('business_subcategory') or ''}. {contact.strip() or ''}\n"
                 except Exception:
                     pass
             else:
@@ -358,12 +357,16 @@ def process_message(
             "question_analysis": structured,
         }
 
-    # Information request: strict RAG only
+    # Information request: strict RAG only (KB may be in Portuguese; user may ask in English)
     if intent == "information_request":
         county_q = county or structured.get("county")
-        matches = search_knowledge(message, state=state, county=county_q)
+        matches = search_knowledge(
+            message, state=state, county=county_q, user_language=detected_lang
+        )
         if not matches and state:
-            matches = search_knowledge(message, state=None, county=None)
+            matches = search_knowledge(
+                message, state=None, county=None, user_language=detected_lang
+            )
         context_parts = []
         for m in matches:
             context_parts.append(f"Q: {m.get('question', '')}\nA: {m.get('answer', '')}")

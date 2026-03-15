@@ -95,6 +95,33 @@ def _fallback_structured(message: str) -> dict:
     }
 
 
+def translate_query_to_portuguese_for_search(query: str) -> str:
+    """
+    Translate the user's question to Portuguese for retrieval when the knowledge base
+    is stored in Portuguese. Improves matching when the user asks in English or Spanish.
+    Returns the Portuguese translation or the original query on failure.
+    """
+    if not client or not query or not query.strip():
+        return query or ""
+    try:
+        resp = client.chat.completions.create(
+            model=settings.GPT_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Translate the following user question to Portuguese (Brazil). Output ONLY the Portuguese translation, no explanation or quotes. Keep the meaning exact for search.",
+                },
+                {"role": "user", "content": query.strip()[:2000]},
+            ],
+            temperature=0,
+        )
+        out = (resp.choices[0].message.content or "").strip()
+        return out if out else query
+    except Exception as e:
+        logger.warning("translate_query_to_portuguese_for_search failed: %s", e)
+        return query
+
+
 # ---------------------------------------------------------------------------
 # Strict RAG: answer ONLY from context; no bullets, no closing, emotional tone
 # ---------------------------------------------------------------------------
